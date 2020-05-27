@@ -288,7 +288,6 @@ class Client(object):
 
         """
 
-        self.cert = cert
         if endpoint is not None:
             if endpoint.startswith('/') and os.path.isfile(endpoint):
                 self.api = _APINode('http+unix://{}'.format(
@@ -311,6 +310,7 @@ class Client(object):
                 path = '/var/lib/lxd/unix.socket'
             endpoint = 'http+unix://{}'.format(parse.quote(path, safe=''))
             self.api = _APINode(endpoint, timeout=timeout)
+        self.cert = cert
         self.api = self.api[version]
 
         # Verify the connection is valid.
@@ -425,7 +425,11 @@ class Client(object):
         if websocket_client is None:
             websocket_client = _WebsocketClient
 
-        client = websocket_client(self.websocket_url)
+        if self.cert is not None:
+            ssl_options = dict(certfile=self.cert[0], keyfile=self.cert[1])
+        else:
+            ssl_options = None
+        client = websocket_client(self.websocket_url, ssl_options=ssl_options)
         parsed = parse.urlparse(self.api.events._api_endpoint)
 
         resource = parsed.path
