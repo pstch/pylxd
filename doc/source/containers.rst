@@ -116,7 +116,7 @@ container. You can also modify container config (limits and etc).
 
 .. code-block:: python
 
-    >>> config = {'name': 'my-container', 'source': {'type': 'image', 'alias': 'ubuntu/trusty'} 'config': {'limits.cpu': '2'}}
+    >>> config = {'name': 'my-container', 'source': {'type': 'image', 'alias': 'ubuntu/trusty'}, 'config': {'limits.cpu': '2'}}
     >>> container = client.containers.create(config, wait=True)
     >>> container.start()
     >>> container.freeze()
@@ -237,7 +237,10 @@ Containers also have a `files` manager for getting and putting files on the
 container.  The following methods are available on the `files` manager:
 
   - `put` - push a file into the container.
+  - `mk_dir` - create an empty directory on the container.
+  - `recursive_put` - recursively push a directory to the container.
   - `get` - get a file from the container.
+  - `recursive_get` - recursively pull a directory from the container.
   - `delete_available` - If the `file_delete` extension is available on the lxc
     host, then this method returns `True` and the `delete` method is available.
   - `delete` - delete a file on the container.

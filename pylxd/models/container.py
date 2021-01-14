@@ -11,9 +11,10 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
-from pylxd.models import Instance
+from pylxd.models.instance import Instance
 
 
 class Container(Instance):
+    """Flavour of :class:`models.Instance <pylxd.models.Instance>` for containers."""
 
-    _endpoint = 'containers'
+    _endpoint = "containers"

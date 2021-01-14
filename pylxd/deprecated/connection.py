@@ -13,48 +13,33 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from collections import namedtuple
 import copy
 import json
 import os
-import six
+import queue
 import socket
 import ssl
 import threading
+from collections import namedtuple
+from http import client as http_client
 
-from six.moves import http_client
-from six.moves import queue
 try:
     from ws4py import client as websocket
 except ImportError:
     websocket = None
 
-from pylxd.deprecated import exceptions
-from pylxd.deprecated import utils
+from pylxd.deprecated import exceptions, utils
 
-if hasattr(ssl, 'SSLContext'):
-    # For Python >= 2.7.9 and Python 3.x
-    if hasattr(ssl, 'PROTOCOL_TLSv1_2'):
-        DEFAULT_TLS_VERSION = ssl.PROTOCOL_TLSv1_2
-    else:
-        DEFAULT_TLS_VERSION = ssl.PROTOCOL_TLSv1
+# For Python >= 2.7.9 and Python 3.x
+if hasattr(ssl, "PROTOCOL_TLSv1_2"):
+    DEFAULT_TLS_VERSION = ssl.PROTOCOL_TLSv1_2
 else:
-    # For Python 2.6 and <= 2.7.8
-    from OpenSSL import SSL
-    DEFAULT_TLS_VERSION = SSL.TLSv1_2_METHOD
+    DEFAULT_TLS_VERSION = ssl.PROTOCOL_TLSv1
 
 
 class UnixHTTPConnection(http_client.HTTPConnection):
-
-    def __init__(self, path, host='localhost', port=None, strict=None,
-                 timeout=None):
-        if six.PY3:
-            http_client.HTTPConnection.__init__(self, host, port=port,
-                                                timeout=timeout)
-        else:
-            http_client.HTTPConnection.__init__(self, host, port=port,
-                                                strict=strict,
-                                                timeout=timeout)
+    def __init__(self, path, host="localhost", port=None, strict=None, timeout=None):
+        http_client.HTTPConnection.__init__(self, host, port=port, timeout=timeout)
 
         self.path = path
 
@@ -71,37 +56,45 @@ class HTTPSConnection(http_client.HTTPConnection):
         http_client.HTTPConnection.__init__(self, *args, **kwargs)
 
     def connect(self):
-        sock = socket.create_connection((self.host, self.port),
-                                        self.timeout, self.source_address)
+        sock = socket.create_connection(
+            (self.host, self.port), self.timeout, self.source_address
+        )
         if self._tunnel_host:
             self.sock = sock
             self._tunnel()
 
         (cert_file, key_file) = self._get_ssl_certs()
-        self.sock = ssl.wrap_socket(sock, certfile=cert_file,
-                                    keyfile=key_file,
-                                    ssl_version=DEFAULT_TLS_VERSION)
+        self.sock = ssl.wrap_socket(
+            sock, certfile=cert_file, keyfile=key_file, ssl_version=DEFAULT_TLS_VERSION
+        )
 
     @staticmethod
     def _get_ssl_certs():
-        return (os.path.join(os.environ['HOME'], '.config/lxc/client.crt'),
-                os.path.join(os.environ['HOME'], '.config/lxc/client.key'))
+        return (
+            os.path.join(os.environ["HOME"], ".config/lxc/client.crt"),
+            os.path.join(os.environ["HOME"], ".config/lxc/client.key"),
+        )
 
 
-_LXDResponse = namedtuple('LXDResponse', ['status', 'body', 'json'])
+_LXDResponse = namedtuple("LXDResponse", ["status", "body", "json"])
 
 
 if websocket is not None:
+
     class WebSocketClient(websocket.WebSocketBaseClient):
-        def __init__(self, url, protocols=None, extensions=None,
-                     ssl_options=None, headers=None):
+        def __init__(
+            self, url, protocols=None, extensions=None, ssl_options=None, headers=None
+        ):
             """WebSocket client that executes into a eventlet green thread."""
-            websocket.WebSocketBaseClient.__init__(self, url, protocols,
-                                                   extensions,
-                                                   ssl_options=ssl_options,
-                                                   headers=headers)
-            self._th = threading.Thread(
-                target=self.run, name='WebSocketClient')
+            websocket.WebSocketBaseClient.__init__(
+                self,
+                url,
+                protocols,
+                extensions,
+                ssl_options=ssl_options,
+                headers=headers,
+            )
+            self._th = threading.Thread(target=self.run, name="WebSocketClient")
             self._th.daemon = True
 
             self.messages = queue.Queue()
@@ -132,19 +125,17 @@ if websocket is not None:
             return message
 
 
-class LXDConnection(object):
-
+class LXDConnection:
     def __init__(self, host=None, port=8443):
         if host:
             self.host = host
             self.port = port
             self.unix_socket = None
         else:
-            if 'LXD_DIR' in os.environ:
-                self.unix_socket = os.path.join(os.environ['LXD_DIR'],
-                                                'unix.socket')
+            if "LXD_DIR" in os.environ:
+                self.unix_socket = os.path.join(os.environ["LXD_DIR"], "unix.socket")
             else:
-                self.unix_socket = '/var/lib/lxd/unix.socket'
+                self.unix_socket = "/var/lib/lxd/unix.socket"
             self.host, self.port = None, None
         self.connection = None
 
@@ -157,10 +148,7 @@ class LXDConnection(object):
         status = response.status
         raw_body = response.read()
         try:
-            if six.PY3:
-                body = json.loads(raw_body.decode())
-            else:
-                body = json.loads(raw_body)
+            body = json.loads(raw_body.decode())
         except ValueError:
             body = None
 
@@ -175,10 +163,10 @@ class LXDConnection(object):
         response = self._request(*args, **kwargs)
 
         if not response.json:
-            raise exceptions.PyLXDException('Null Data')
+            raise exceptions.PyLXDException("Null Data")
         elif response.status == 200 or (
-                response.status == 202 and
-                response.json.get('status_code') == 100):
+            response.status == 202 and response.json.get("status_code") == 100
+        ):
             return response.status, response.json
         else:
             utils.get_lxd_error(response.status, response.json)
@@ -187,12 +175,12 @@ class LXDConnection(object):
         response = self._request(*args, **kwargs)
 
         if not response.json:
-            raise exceptions.PyLXDException('Null Data')
-        elif response.json.get('error'):
+            raise exceptions.PyLXDException("Null Data")
+        elif response.json.get("error"):
             utils.get_lxd_error(response.status, response.json)
         elif response.status == 200 or (
-                response.status == 202 and
-                response.json.get('status_code') == 100):
+            response.status == 202 and response.json.get("status_code") == 100
+        ):
             return True
         return False
 
@@ -200,23 +188,22 @@ class LXDConnection(object):
         response = self._request(*args, **kwargs)
 
         if not response.body:
-            raise exceptions.PyLXDException('Null Body')
+            raise exceptions.PyLXDException("Null Body")
         elif response.status == 200:
             return response.body
         else:
-            raise exceptions.PyLXDException('Failed to get raw response')
+            raise exceptions.PyLXDException("Failed to get raw response")
 
     def get_ws(self, path):
         if websocket is None:
-            raise ValueError(
-                'This feature requires the optional ws4py library.')
+            raise ValueError("This feature requires the optional ws4py library.")
         if self.unix_socket:
-            connection_string = 'ws+unix://%s' % self.unix_socket
+            connection_string = "ws+unix://%s" % self.unix_socket
         else:
-            connection_string = (
-                'wss://%(host)s:%(port)s' % {'host': self.host,
-                                             'port': self.port}
-            )
+            connection_string = "wss://%(host)s:%(port)s" % {
+                "host": self.host,
+                "port": self.port,
+            }
 
         ws = WebSocketClient(connection_string)
         ws.resource = path

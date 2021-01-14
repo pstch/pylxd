@@ -12,16 +12,17 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 import collections
+import json
 import os
 import stat
 import time
+from urllib import parse
 
-import six
-from six.moves.urllib import parse
 try:
     from ws4py.client import WebSocketBaseClient
     from ws4py.manager import WebSocketManager
     from ws4py.messaging import BinaryMessage
+
     _ws4py_installed = True
 except ImportError:  # pragma: no cover
     WebSocketBaseClient = object
@@ -32,22 +33,14 @@ from pylxd.exceptions import LXDAPIException
 from pylxd.models import _model as model
 from pylxd.models.operation import Operation
 
-if six.PY2:
-    # Python2.7 doesn't have this natively
-    from pylxd.exceptions import NotADirectoryError
 
-
-class InstanceState(object):
+class InstanceState(model.AttributeDict):
     """A simple object for representing instance state."""
-
-    def __init__(self, **kwargs):
-        for key, value in six.iteritems(kwargs):
-            setattr(self, key, value)
 
 
 _InstanceExecuteResult = collections.namedtuple(
-    'InstanceExecuteResult',
-    ['exit_code', 'stdout', 'stderr'])
+    "InstanceExecuteResult", ["exit_code", "stdout", "stderr"]
+)
 
 
 class Instance(model.Model):
@@ -78,19 +71,20 @@ class Instance(model.Model):
     snapshots = model.Manager()
     files = model.Manager()
 
-    _endpoint = 'instances'
+    _endpoint = "instances"
 
     @property
     def api(self):
         return self.client.api[self._endpoint][self.name]
 
-    class FilesManager(object):
+    class FilesManager:
         """A pseudo-manager for namespacing file operations."""
 
         def __init__(self, instance):
             self._instance = instance
-            self._endpoint = instance.client.api[
-                instance._endpoint][instance.name].files
+            self._endpoint = instance.client.api[instance._endpoint][
+                instance.name
+            ].files
 
         def put(self, filepath, data, mode=None, uid=None, gid=None):
             """Push a file to the instance.
@@ -116,9 +110,33 @@ class Instance(model.Model):
             """
             headers = self._resolve_headers(mode=mode, uid=uid, gid=gid)
             response = self._endpoint.post(
-                params={'path': filepath},
-                data=data,
-                headers=headers or None)
+                params={"path": filepath}, data=data, headers=headers or None
+            )
+            if response.status_code == 200:
+                return
+            raise LXDAPIException(response)
+
+        def mk_dir(self, path, mode=None, uid=None, gid=None):
+            """Creates an empty directory on the container.
+            This pushes an empty directory to the containers file system
+            named by the `filepath`.
+            :param path: The path in the container to to store the data in.
+            :type path: str
+            :param mode: The unit mode to store the file with.  The default of
+                None stores the file with the current mask of 0700, which is
+                the lxd default.
+            :type mode: Union[oct, int, str]
+            :param uid: The uid to use inside the container. Default of None
+                results in 0 (root).
+            :type uid: int
+            :param gid: The gid to use inside the container.  Default of None
+                results in 0 (root).
+            :type gid: int
+            :raises: LXDAPIException if something goes wrong
+            """
+            headers = self._resolve_headers(mode=mode, uid=uid, gid=gid)
+            headers["X-LXD-type"] = "directory"
+            response = self._endpoint.post(params={"path": path}, headers=headers)
             if response.status_code == 200:
                 return
             raise LXDAPIException(response)
@@ -129,33 +147,32 @@ class Instance(model.Model):
                 headers = {}
             if mode is not None:
                 if isinstance(mode, int):
-                    mode = format(mode, 'o')
-                if not isinstance(mode, six.string_types):
+                    mode = format(mode, "o")
+                if not isinstance(mode, str):
                     raise ValueError("'mode' parameter must be int or string")
-                if not mode.startswith('0'):
-                    mode = '0{}'.format(mode)
-                headers['X-LXD-mode'] = mode
+                if not mode.startswith("0"):
+                    mode = "0{}".format(mode)
+                headers["X-LXD-mode"] = mode
             if uid is not None:
-                headers['X-LXD-uid'] = str(uid)
+                headers["X-LXD-uid"] = str(uid)
             if gid is not None:
-                headers['X-LXD-gid'] = str(gid)
+                headers["X-LXD-gid"] = str(gid)
             return headers
 
         def delete_available(self):
             """File deletion is an extension API and may not be available.
             https://github.com/lxc/lxd/blob/master/doc/api-extensions.md#file_delete
             """
-            return self._instance.client.has_api_extension('file_delete')
+            return self._instance.client.has_api_extension("file_delete")
 
         def delete(self, filepath):
-            self._instance.client.assert_has_api_extension('file_delete')
-            response = self._endpoint.delete(params={'path': filepath})
+            self._instance.client.assert_has_api_extension("file_delete")
+            response = self._endpoint.delete(params={"path": filepath})
             if response.status_code != 200:
                 raise LXDAPIException(response)
 
         def get(self, filepath):
-            response = self._endpoint.get(
-                params={'path': filepath}, is_api=False)
+            response = self._endpoint.get(params={"path": filepath}, is_api=False)
             return response.content
 
         def recursive_put(self, src, dst, mode=None, uid=None, gid=None):
@@ -184,45 +201,73 @@ class Instance(model.Model):
             """
             norm_src = os.path.normpath(src)
             if not os.path.isdir(norm_src):
-                raise NotADirectoryError(
-                    "'src' parameter must be a directory "
-                )
+                raise NotADirectoryError("'src' parameter must be a directory ")
 
             idx = len(norm_src)
             dst_items = set()
 
             for path, dirname, files in os.walk(norm_src):
                 dst_path = os.path.normpath(
-                    os.path.join(dst, path[idx:].lstrip(os.path.sep)))
+                    os.path.join(dst, path[idx:].lstrip(os.path.sep))
+                )
                 # create directory or symlink (depending on what's there)
                 if path not in dst_items:
                     dst_items.add(path)
-                    headers = self._resolve_headers(mode=mode,
-                                                    uid=uid, gid=gid)
+                    headers = self._resolve_headers(mode=mode, uid=uid, gid=gid)
                     # determine what the file is: a directory or a symlink
                     fmode = os.stat(path).st_mode
                     if stat.S_ISLNK(fmode):
-                        headers['X-LXD-type'] = 'symlink'
+                        headers["X-LXD-type"] = "symlink"
                     else:
-                        headers['X-LXD-type'] = 'directory'
-                    self._endpoint.post(
-                        params={'path': dst_path},
-                        headers=headers)
+                        headers["X-LXD-type"] = "directory"
+                    self._endpoint.post(params={"path": dst_path}, headers=headers)
 
                 # copy files
                 for f in files:
                     src_file = os.path.join(path, f)
-                    with open(src_file, 'rb') as fp:
+                    with open(src_file, "rb") as fp:
                         filepath = os.path.join(dst_path, f)
-                        headers = self._resolve_headers(mode=mode,
-                                                        uid=uid,
-                                                        gid=gid)
+                        headers = self._resolve_headers(mode=mode, uid=uid, gid=gid)
                         response = self._endpoint.post(
-                            params={'path': filepath},
+                            params={"path": filepath},
                             data=fp.read(),
-                            headers=headers or None)
+                            headers=headers or None,
+                        )
                         if response.status_code != 200:
                             raise LXDAPIException(response)
+
+        def recursive_get(self, remote_path, local_path):
+            """Recursively pulls a directory from the container.
+            Pulls the directory named `remote_path` from the container and
+            creates a local folder named `local_path` with the
+            content of `remote_path`.
+            If `remote_path` is a file, it will be copied to `local_path`.
+            :param remote_path: The directory path on the container.
+            :type remote_path: str
+            :param local_path: The path at which the directory will be stored.
+            :type local_path: str
+            :return:
+            :raises: LXDAPIException if an error occurs
+            """
+            response = self._endpoint.get(params={"path": remote_path}, is_api=False)
+
+            if "X-LXD-type" in response.headers:
+                if response.headers["X-LXD-type"] == "directory":
+                    # TODO: We considered using the X-LXD-uid, X-LXD-gid,
+                    #       and X-LXD-mode header information, but it was
+                    #       beyond the scope of this change.
+                    os.mkdir(local_path)
+                    content = json.loads(response.content)
+                    if "metadata" in content and content["metadata"]:
+                        for file in content["metadata"]:
+                            self.recursive_get(
+                                os.path.join(remote_path, file),
+                                os.path.join(local_path, file),
+                            )
+                elif response.headers["X-LXD-type"] == "file":
+                    with open(local_path, "wb") as f:
+                        # TODO: Same thoughts on file permissions as above.
+                        f.write(response.content)
 
     @classmethod
     def exists(cls, client, name):
@@ -238,7 +283,7 @@ class Instance(model.Model):
         """Get a instance by name."""
         response = client.api[cls._endpoint][name].get()
 
-        return cls(client, **response.json()['metadata'])
+        return cls(client, **response.json()["metadata"])
 
     @classmethod
     def all(cls, client):
@@ -252,8 +297,8 @@ class Instance(model.Model):
         response = client.api[cls._endpoint].get()
 
         instances = []
-        for url in response.json()['metadata']:
-            name = url.split('/')[-1]
+        for url in response.json()["metadata"]:
+            name = url.split("/")[-1]
             instances.append(cls(client, name=name))
         return instances
 
@@ -273,88 +318,75 @@ class Instance(model.Model):
         :returns: an instance if successful
         :rtype: :class:`Instance`
         """
-        response = client.api[cls._endpoint].post(
-            json=config, target=target)
+        response = client.api[cls._endpoint].post(json=config, target=target)
 
         if wait:
-            client.operations.wait_for_operation(response.json()['operation'])
-        return cls(client, name=config['name'])
+            client.operations.wait_for_operation(response.json()["operation"])
+        return cls(client, name=config["name"])
 
     def __init__(self, *args, **kwargs):
-        super(Instance, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
         self.snapshots = managers.SnapshotManager(self.client, self)
         self.files = self.FilesManager(self)
 
     def rename(self, name, wait=False):
         """Rename an instance."""
-        response = self.api.post(json={'name': name})
+        response = self.api.post(json={"name": name})
 
         if wait:
-            self.client.operations.wait_for_operation(
-                response.json()['operation'])
+            self.client.operations.wait_for_operation(response.json()["operation"])
         self.name = name
 
     def _set_state(self, state, timeout=30, force=True, wait=False):
-        response = self.api.state.put(json={
-            'action': state,
-            'timeout': timeout,
-            'force': force
-        })
+        response = self.api.state.put(
+            json={"action": state, "timeout": timeout, "force": force}
+        )
         if wait:
-            self.client.operations.wait_for_operation(
-                response.json()['operation'])
-            if 'status' in self.__dirty__:
-                self.__dirty__.remove('status')
-            if self.ephemeral and state == 'stop':
+            self.client.operations.wait_for_operation(response.json()["operation"])
+            if "status" in self.__dirty__:
+                self.__dirty__.remove("status")
+            if self.ephemeral and state == "stop":
                 self.client = None
             else:
                 self.sync()
 
     def state(self):
         response = self.api.state.get()
-        state = InstanceState(**response.json()['metadata'])
+        state = InstanceState(response.json()["metadata"])
         return state
 
     def start(self, timeout=30, force=True, wait=False):
         """Start the instance."""
-        return self._set_state('start',
-                               timeout=timeout,
-                               force=force,
-                               wait=wait)
+        return self._set_state("start", timeout=timeout, force=force, wait=wait)
 
     def stop(self, timeout=30, force=True, wait=False):
         """Stop the instance."""
-        return self._set_state('stop',
-                               timeout=timeout,
-                               force=force,
-                               wait=wait)
+        return self._set_state("stop", timeout=timeout, force=force, wait=wait)
 
     def restart(self, timeout=30, force=True, wait=False):
         """Restart the instance."""
-        return self._set_state('restart',
-                               timeout=timeout,
-                               force=force,
-                               wait=wait)
+        return self._set_state("restart", timeout=timeout, force=force, wait=wait)
 
     def freeze(self, timeout=30, force=True, wait=False):
         """Freeze the instance."""
-        return self._set_state('freeze',
-                               timeout=timeout,
-                               force=force,
-                               wait=wait)
+        return self._set_state("freeze", timeout=timeout, force=force, wait=wait)
 
     def unfreeze(self, timeout=30, force=True, wait=False):
         """Unfreeze the instance."""
-        return self._set_state('unfreeze',
-                               timeout=timeout,
-                               force=force,
-                               wait=wait)
+        return self._set_state("unfreeze", timeout=timeout, force=force, wait=wait)
 
     def execute(
-            self, commands, environment=None, encoding=None, decode=True,
-            stdin_payload=None, stdin_encoding="utf-8",
-            stdout_handler=None, stderr_handler=None):
+        self,
+        commands,
+        environment=None,
+        encoding=None,
+        decode=True,
+        stdin_payload=None,
+        stdin_encoding="utf-8",
+        stdout_handler=None,
+        stderr_handler=None,
+    ):
         """Execute a command on the instance. stdout and stderr are buffered if
         no handler is given.
 
@@ -384,42 +416,52 @@ class Instance(model.Model):
         :rtype: _InstanceExecuteResult() namedtuple
         """
         if not _ws4py_installed:
-            raise ValueError(
-                'This feature requires the optional ws4py library.')
-        if isinstance(commands, six.string_types):
+            raise ValueError("This feature requires the optional ws4py library.")
+        if isinstance(commands, str):
             raise TypeError("First argument must be a list.")
         if environment is None:
             environment = {}
 
-        response = self.api['exec'].post(json={
-            'command': commands,
-            'environment': environment,
-            'wait-for-websocket': True,
-            'interactive': False,
-        })
+        response = self.api["exec"].post(
+            json={
+                "command": commands,
+                "environment": environment,
+                "wait-for-websocket": True,
+                "interactive": False,
+            }
+        )
 
-        fds = response.json()['metadata']['metadata']['fds']
-        operation_id = \
-            Operation.extract_operation_id(response.json()['operation'])
+        fds = response.json()["metadata"]["metadata"]["fds"]
+        operation_id = Operation.extract_operation_id(response.json()["operation"])
         parsed = parse.urlparse(
-            self.client.api.operations[operation_id].websocket._api_endpoint)
+            self.client.api.operations[operation_id].websocket._api_endpoint
+        )
 
         with managers.web_socket_manager(WebSocketManager()) as manager:
             stdin = _StdinWebsocket(
-                self.client.websocket_url, payload=stdin_payload,
-                encoding=stdin_encoding
+                self.client.websocket_url,
+                payload=stdin_payload,
+                encoding=stdin_encoding,
             )
-            stdin.resource = '{}?secret={}'.format(parsed.path, fds['0'])
+            stdin.resource = "{}?secret={}".format(parsed.path, fds["0"])
             stdin.connect()
             stdout = _CommandWebsocketClient(
-                manager, self.client.websocket_url,
-                encoding=encoding, decode=decode, handler=stdout_handler)
-            stdout.resource = '{}?secret={}'.format(parsed.path, fds['1'])
+                manager,
+                self.client.websocket_url,
+                encoding=encoding,
+                decode=decode,
+                handler=stdout_handler,
+            )
+            stdout.resource = "{}?secret={}".format(parsed.path, fds["1"])
             stdout.connect()
             stderr = _CommandWebsocketClient(
-                manager, self.client.websocket_url,
-                encoding=encoding, decode=decode, handler=stderr_handler)
-            stderr.resource = '{}?secret={}'.format(parsed.path, fds['2'])
+                manager,
+                self.client.websocket_url,
+                encoding=encoding,
+                decode=decode,
+                handler=stderr_handler,
+            )
+            stderr.resource = "{}?secret={}".format(parsed.path, fds["2"])
             stderr.connect()
 
             manager.start()
@@ -427,9 +469,9 @@ class Instance(model.Model):
             # watch for the end of the command:
             while True:
                 operation = self.client.operations.get(operation_id)
-                if 'return' in operation.metadata:
+                if "return" in operation.metadata:
                     break
-                time.sleep(.5)  # pragma: no cover
+                time.sleep(0.5)  # pragma: no cover
 
             try:
                 stdin.close()
@@ -444,13 +486,14 @@ class Instance(model.Model):
                 pass
 
             while not stdout.finished or not stderr.finished:
-                time.sleep(.1)  # progma: no cover
+                time.sleep(0.1)  # progma: no cover
 
             manager.stop()
             manager.join()
 
             return _InstanceExecuteResult(
-                operation.metadata['return'], stdout.data, stderr.data)
+                operation.metadata["return"], stdout.data, stderr.data
+            )
 
     def raw_interactive_execute(self, commands, environment=None):
         """Execute a command on the instance interactively and returns
@@ -466,27 +509,31 @@ class Instance(model.Model):
         :returns: Two urls to an interactive websocket and a control socket
         :rtype: {'ws':str,'control':str}
         """
-        if isinstance(commands, six.string_types):
+        if isinstance(commands, str):
             raise TypeError("First argument must be a list.")
 
         if environment is None:
             environment = {}
 
-        response = self.api['exec'].post(json={
-            'command': commands,
-            'environment': environment,
-            'wait-for-websocket': True,
-            'interactive': True,
-        })
+        response = self.api["exec"].post(
+            json={
+                "command": commands,
+                "environment": environment,
+                "wait-for-websocket": True,
+                "interactive": True,
+            }
+        )
 
-        fds = response.json()['metadata']['metadata']['fds']
-        operation_id = response.json()['operation']\
-            .split('/')[-1].split('?')[0]
+        fds = response.json()["metadata"]["metadata"]["fds"]
+        operation_id = response.json()["operation"].split("/")[-1].split("?")[0]
         parsed = parse.urlparse(
-            self.client.api.operations[operation_id].websocket._api_endpoint)
+            self.client.api.operations[operation_id].websocket._api_endpoint
+        )
 
-        return {'ws': '{}?secret={}'.format(parsed.path, fds['0']),
-                'control': '{}?secret={}'.format(parsed.path, fds['control'])}
+        return {
+            "ws": "{}?secret={}".format(parsed.path, fds["0"]),
+            "control": "{}?secret={}".format(parsed.path, fds["control"]),
+        }
 
     def migrate(self, new_client, live=False, wait=False):
         """Migrate a instance.
@@ -514,13 +561,14 @@ class Instance(model.Model):
             migration and not the operation if waited on.)
         :rtype: :class:`requests.Response`
         """
-        if self.api.scheme in ('http+unix',):
-            raise ValueError('Cannot migrate from a local client connection')
+        if self.api.scheme in ("http+unix",):
+            raise ValueError("Cannot migrate from a local client connection")
 
         if self.status_code == 103:
             try:
                 res = getattr(new_client, self._endpoint).create(
-                    self.generate_migration_data(live), wait=wait)
+                    self.generate_migration_data(live), wait=wait
+                )
             except LXDAPIException as e:
                 if e.response.status_code == 103:
                     self.delete()
@@ -529,7 +577,8 @@ class Instance(model.Model):
                     raise e
         else:
             res = getattr(new_client, self._endpoint).create(
-                self.generate_migration_data(live), wait=wait)
+                self.generate_migration_data(live), wait=wait
+            )
         self.delete()
         return res
 
@@ -548,29 +597,29 @@ class Instance(model.Model):
         :rtype: Dict[str, ANY]
         """
         self.sync()  # Make sure the object isn't stale
-        _json = {'migration': True}
+        _json = {"migration": True}
         if live:
-            _json['live'] = True
+            _json["live"] = True
         response = self.api.post(json=_json)
-        operation = self.client.operations.get(response.json()['operation'])
+        operation = self.client.operations.get(response.json()["operation"])
         operation_url = self.client.api.operations[operation.id]._api_endpoint
-        secrets = response.json()['metadata']['metadata']
-        cert = self.client.host_info['environment']['certificate']
+        secrets = response.json()["metadata"]["metadata"]
+        cert = self.client.host_info["environment"]["certificate"]
 
         return {
-            'name': self.name,
-            'architecture': self.architecture,
-            'config': self.config,
-            'devices': self.devices,
-            'epehemeral': self.ephemeral,
-            'default': self.profiles,
-            'source': {
-                'type': 'migration',
-                'operation': operation_url,
-                'mode': 'pull',
-                'certificate': cert,
-                'secrets': secrets,
-            }
+            "name": self.name,
+            "architecture": self.architecture,
+            "config": self.config,
+            "devices": self.devices,
+            "epehemeral": self.ephemeral,
+            "default": self.profiles,
+            "source": {
+                "type": "migration",
+                "operation": operation_url,
+                "mode": "pull",
+                "certificate": cert,
+                "secrets": secrets,
+            },
         }
 
     def publish(self, public=False, wait=False):
@@ -583,19 +632,20 @@ class Instance(model.Model):
         If wait=True, an Image is returned.
         """
         data = {
-            'public': public,
-            'source': {
-                'type': self.type,
-                'name': self.name,
-            }
+            "public": public,
+            "source": {
+                "type": self.type,
+                "name": self.name,
+            },
         }
 
         response = self.client.api.images.post(json=data)
         if wait:
             operation = self.client.operations.wait_for_operation(
-                response.json()['operation'])
+                response.json()["operation"]
+            )
 
-            return self.client.images.get(operation.metadata['fingerprint'])
+            return self.client.images.get(operation.metadata["fingerprint"])
 
     def restore_snapshot(self, snapshot_name, wait=False):
         """Restore a snapshot using its name.
@@ -615,8 +665,7 @@ class Instance(model.Model):
         """
         response = self.api.put(json={"restore": snapshot_name})
         if wait:
-            self.client.operations.wait_for_operation(
-                response.json()['operation'])
+            self.client.operations.wait_for_operation(response.json()["operation"])
         return response
 
 
@@ -627,15 +676,15 @@ class _CommandWebsocketClient(WebSocketBaseClient):  # pragma: no cover
 
     def __init__(self, manager, *args, **kwargs):
         self.manager = manager
-        self.decode = kwargs.pop('decode', True)
-        self.encoding = kwargs.pop('encoding', None)
-        self.handler = kwargs.pop('handler', None)
+        self.decode = kwargs.pop("decode", True)
+        self.encoding = kwargs.pop("encoding", None)
+        self.handler = kwargs.pop("handler", None)
         self.message_encoding = None
         self.finish_off = False
         self.finished = False
         self.last_message_empty = False
         self.buffer = []
-        super(_CommandWebsocketClient, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
     def handshake_ok(self):
         self.manager.add(self)
@@ -673,12 +722,12 @@ class _CommandWebsocketClient(WebSocketBaseClient):  # pragma: no cover
             if self.message_encoding:
                 return buffer.decode(self.message_encoding)
             # This is the backwards compatible "always decode to utf-8"
-            return buffer.decode('utf-8')
+            return buffer.decode("utf-8")
         return buffer
 
     @property
     def data(self):
-        buffer = b''.join(self.buffer)
+        buffer = b"".join(self.buffer)
         return self._maybe_decode(buffer)
 
 
@@ -689,12 +738,12 @@ class _StdinWebsocket(WebSocketBaseClient):  # pragma: no cover
     """
 
     def __init__(self, url, payload=None, **kwargs):
-        self.encoding = kwargs.pop('encoding', None)
+        self.encoding = kwargs.pop("encoding", None)
         self.payload = payload
-        super(_StdinWebsocket, self).__init__(url, **kwargs)
+        super().__init__(url, **kwargs)
 
     def _smart_encode(self, msg):
-        if type(msg) == six.text_type and self.encoding:
+        if type(msg) == str and self.encoding:
             return msg.encode(self.encoding)
         return msg
 
@@ -702,8 +751,7 @@ class _StdinWebsocket(WebSocketBaseClient):  # pragma: no cover
         if self.payload:
             if hasattr(self.payload, "read"):
                 self.send(
-                    (self._smart_encode(line) for line in self.payload),
-                    binary=True
+                    (self._smart_encode(line) for line in self.payload), binary=True
                 )
             else:
                 self.send(self._smart_encode(self.payload), binary=True)
@@ -721,50 +769,46 @@ class Snapshot(model.Model):
 
     @property
     def api(self):
-        return self.client.api[self.instance._endpoint][
-            self.instance.name].snapshots[self.name]
+        return self.client.api[self.instance._endpoint][self.instance.name].snapshots[
+            self.name
+        ]
 
     @classmethod
     def get(cls, client, instance, name):
-        response = client.api[instance._endpoint][
-            instance.name].snapshots[name].get()
+        response = client.api[instance._endpoint][instance.name].snapshots[name].get()
 
-        snapshot = cls(
-            client, instance=instance,
-            **response.json()['metadata'])
+        snapshot = cls(client, instance=instance, **response.json()["metadata"])
         # Snapshot names are namespaced in LXD, as
         # instance-name/snapshot-name. We hide that implementation
         # detail.
-        snapshot.name = snapshot.name.split('/')[-1]
+        snapshot.name = snapshot.name.split("/")[-1]
         return snapshot
 
     @classmethod
     def all(cls, client, instance):
-        response = client.api[instance._endpoint][
-            instance.name].snapshots.get()
+        response = client.api[instance._endpoint][instance.name].snapshots.get()
 
-        return [cls(
-                client, name=snapshot.split('/')[-1],
-                instance=instance)
-                for snapshot in response.json()['metadata']]
+        return [
+            cls(client, name=snapshot.split("/")[-1], instance=instance)
+            for snapshot in response.json()["metadata"]
+        ]
 
     @classmethod
     def create(cls, client, instance, name, stateful=False, wait=False):
-        response = client.api[instance._endpoint][
-            instance.name].snapshots.post(
-                json={'name': name, 'stateful': stateful})
+        response = client.api[instance._endpoint][instance.name].snapshots.post(
+            json={"name": name, "stateful": stateful}
+        )
 
         snapshot = cls(client, instance=instance, name=name)
         if wait:
-            client.operations.wait_for_operation(response.json()['operation'])
+            client.operations.wait_for_operation(response.json()["operation"])
         return snapshot
 
     def rename(self, new_name, wait=False):
         """Rename a snapshot."""
-        response = self.api.post(json={'name': new_name})
+        response = self.api.post(json={"name": new_name})
         if wait:
-            self.client.operations.wait_for_operation(
-                response.json()['operation'])
+            self.client.operations.wait_for_operation(response.json()["operation"])
         self.name = new_name
 
     def publish(self, public=False, wait=False):
@@ -778,18 +822,19 @@ class Snapshot(model.Model):
         that this works, or file a bug to fix it appropriately.
         """
         data = {
-            'public': public,
-            'source': {
-                'type': 'snapshot',
-                'name': '{}/{}'.format(self.instance.name, self.name),
-            }
+            "public": public,
+            "source": {
+                "type": "snapshot",
+                "name": "{}/{}".format(self.instance.name, self.name),
+            },
         }
 
         response = self.client.api.images.post(json=data)
         if wait:
             operation = self.client.operations.wait_for_operation(
-                response.json()['operation'])
-            return self.client.images.get(operation.metadata['fingerprint'])
+                response.json()["operation"]
+            )
+            return self.client.images.get(operation.metadata["fingerprint"])
 
     def restore(self, wait=False):
         """Restore this snapshot.
